@@ -54,7 +54,7 @@ class composite_ipr:
         Returns:
             float: Maximum flow rate (q_max) in STB/day.
         """
-        return self.q_test/(1 - 0.2 * (self.Pwf_test / self.Pr) - 0.8 * (self.Pwf_test / self.Pr)**2)
+        return self.q_bp + (self.J * self.Pb) / 1.8
 
     def calculate_q(self, Pwf):
         """
@@ -156,6 +156,57 @@ class darcy_ipr:
         plt.scatter(self.q_test, self.Pwf_test, color='black', zorder=5, label='Well Test Data Point')
         
         plt.title('Darcy Inflow Performance Relationship (IPR)', fontweight='bold')
+        plt.xlabel('Liquid Flow Rate, q (STB/day)')
+        plt.ylabel('Bottom-Hole Flowing Pressure, Pwf (psia)')
+        plt.ylim(bottom=0)
+        plt.xlim(left=0)
+        
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.show()
+
+class vogel_ipr:
+    """
+    Calculates and plots the Inflow Performance Relationship (IPR) using 
+    pure Vogel's equation for saturated oil reservoirs.
+    """
+    def __init__(self, Pr, Pb, q_test, Pwf_test):
+        self.Pr = Pr
+        self.Pb = Pb  # Included for API compatibility with other models
+        self.q_test = q_test
+        self.Pwf_test = Pwf_test
+        
+        self.q_max = self._calculate_aof()
+        # J is approximated at Pr (initial slope) for GUI compatibility
+        self.J = 1.8 * self.q_max / self.Pr if self.Pr > 0 else 0.0
+
+    def _calculate_aof(self):
+        vogel_term = 1.0 - 0.2 * (self.Pwf_test / self.Pr) - 0.8 * (self.Pwf_test / self.Pr)**2
+        return self.q_test / vogel_term if vogel_term > 0 else 0.0
+
+    def calculate_q(self, Pwf):
+        if Pwf >= self.Pr:
+            return 0.0
+        vogel_term = 1.0 - 0.2 * (Pwf / self.Pr) - 0.8 * (Pwf / self.Pr)**2
+        return self.q_max * vogel_term
+
+    def calculate_Pwf(self, q):
+        q_target = min(q, self.q_max)
+        if self.q_max <= 0:
+            return 0.0
+        radicand = max(0.0, 3.24 - 3.2 * (q_target / self.q_max))
+        Pwf = self.Pr * (np.sqrt(radicand) - 0.2) / 1.6
+        return max(0.0, Pwf)
+
+    def plot_ipr(self, points=50):
+        Q = np.linspace(0, self.q_max, points)
+        Pwf_points = [self.calculate_Pwf(q) for q in Q]
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(Q, Pwf_points, label='Vogel IPR Curve', color='green', linewidth=2)
+        plt.scatter(self.q_test, self.Pwf_test, color='black', zorder=5, label='Well Test Data Point')
+        
+        plt.title('Vogel Inflow Performance Relationship (IPR)', fontweight='bold')
         plt.xlabel('Liquid Flow Rate, q (STB/day)')
         plt.ylabel('Bottom-Hole Flowing Pressure, Pwf (psia)')
         plt.ylim(bottom=0)

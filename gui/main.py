@@ -28,8 +28,10 @@ if ROOT not in sys.path:
 
 from core.pvt import BlackOilPVT
 from core.ipr import composite_ipr
-from core.vlp import HagedornBrown
 from core.ipr import darcy_ipr
+from core.ipr import vogel_ipr
+from core.vlp import HagedornBrown
+
 from core.solver_other import find_operating_points
 
 # ── Qt ────────────────────────────────────────────────────────────────────────
@@ -269,6 +271,8 @@ def _build_ipr(p: dict) -> composite_ipr:
     elif model == "Composite":
         # Pure Vogel: set Pb = Pr so the entire curve uses the Vogel equation
         return composite_ipr(Pr=Pr, Pb=Pr, q_test=qt, Pwf_test=pwft)
+    elif model == "Vogel":
+        return vogel_ipr(Pr=Pr, Pb=Pb, q_test=qt, Pwf_test=pwft)
     else:
         # "Composite Vogel-Darcy" and "Fetkovitch" both use composite IPR
         return composite_ipr(Pr=Pr, Pb=Pb, q_test=qt, Pwf_test=pwft)
@@ -856,7 +860,7 @@ class IprSection(QWidget):
         view.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.model.setView(view)
         self.model.addItems([
-            "Composite", "Vogel (soon)", "Darcy", "Fetkovitch (soon)"])
+            "Composite", "Vogel", "Darcy", "Fetkovitch (soon)"])
         lay.addWidget(_row("IPR Model", self.model))
 
         # Inputs
@@ -908,6 +912,15 @@ class IprSection(QWidget):
                     q_test=self.qt.value(), Pwf_test=self.pwf.value())
                 self.aof_lbl.setText(f"{ipr.q_max:.1f}")
                 self.pi_lbl.setText(f"{ipr.J:.4f}")
+            elif self.model.currentText() == "Vogel":
+                ipr = vogel_ipr(
+                    Pr=self.pr.value(), Pb=self.pb.value(),
+                    q_test=self.qt.value(), Pwf_test=self.pwf.value())
+                self.aof_lbl.setText(f"{ipr.q_max:.1f}")
+                self.pi_lbl.setText(f"{ipr.J:.4f}")
+            elif self.model.currentText() == "Fetkovitch (soon)":
+                self.aof_lbl.setText("—")
+                self.pi_lbl.setText("—")
         except Exception:
             self.aof_lbl.setText("—")
             self.pi_lbl.setText("—")
