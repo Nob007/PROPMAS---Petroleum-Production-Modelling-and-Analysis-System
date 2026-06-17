@@ -27,10 +27,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from core.pvt import BlackOilPVT
-from core.ipr import composite_ipr
-from core.ipr import darcy_ipr
-from core.ipr import vogel_ipr
-from core.vlp import HagedornBrown
+from core.ipr import composite_ipr, darcy_ipr, vogel_ipr
+from core.vlp import HagedornBrown, Beggs_Brill
 
 from core.solver_other import find_operating_points
 
@@ -229,7 +227,8 @@ def _build_pvt_vlp(p: dict) -> tuple[BlackOilPVT, HagedornBrown]:
         sg_water=p["sg_water"], watercut=p["wc"]
     )
     # Initial fluid properties at tubing head conditions
-    fp0 = pvt.fluid_properties_dict(p["thp"], p["T_surface"], p["gor"])
+    Rsb = pvt.rsb_from_test(p["gor"], p["thp"], p["Pb"], p["T_surface"])
+    fp0 = pvt.fluid_properties_dict(p["thp"], p["T_surface"], Rsb, p["Pb"])
     if p["model"] == "Hagedron-Brown":
         vlp = HagedornBrown(
             tubing_id=p["tubing_id"], tubing_od=p["tubing_od"],
@@ -237,6 +236,13 @@ def _build_pvt_vlp(p: dict) -> tuple[BlackOilPVT, HagedornBrown]:
             pvt_model=pvt, fluid_properties=fp0,
             watercut=p["wc"], theta=p["theta"],
         )
+    elif p["model"] == "Beggs and Brill":
+        vlp = Beggs_Brill(
+            tubing_id=p["tubing_id"], tubing_od=p["tubing_od"],
+            casing_id=p["casing_id"], roughness=p["roughness"],
+            pvt_model=pvt, fluid_properties=fp0,
+            watercut=p["wc"], theta=p["theta"],
+        ) 
     # vlp = HagedornBrown(
     #     tubing_id=p["tubing_id"], tubing_od=p["tubing_od"],
     #     casing_id=p["casing_id"], roughness=p["roughness"],
@@ -995,7 +1001,7 @@ class VlpSection(QWidget):
         view.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.model.setView(view)
         self.model.addItems([
-            "Hagedron-Brown", "Duns and Ross (soon)", "Beggs and Brill (soon)"])
+            "Hagedron-Brown", "Duns and Ross (soon)", "Beggs and Brill"])
         lay.addWidget(_row("VLP Model", self.model))
 
         self.tid   = _dspin(2.441, 0.5, 5.5,    0.1,  3)
@@ -1048,7 +1054,7 @@ class RateSection(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
-        self.qmin  = _dspin(50.0,   1,    1000,  10,  1)
+        self.qmin  = _dspin(0.0,   1,    1000,  10,  1)
         self.qmax  = _dspin(3000.0, 100, 50000, 100,  1)
         self.qstep = _dspin(50.0,   1,    500,   10,  1)
         self.dz    = _dspin(200.0,  10,  1000,   10,  1)

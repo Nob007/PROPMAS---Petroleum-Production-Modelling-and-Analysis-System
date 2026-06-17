@@ -14,13 +14,12 @@ class HagedornBrown:
         self.tid      = tubing_id #ft
         self.tod      = tubing_od #ft
         self.cid      = casing_id #ft
-        self.roughness = roughness #
+        self.roughness = roughness #ft
         self.pvt_model = pvt_model
         self.wc       = watercut
         self.wor      = watercut / (1.0 - watercut + 1e-9)
         self.theta    = np.radians(theta)
         self.Ap       = (np.pi / 4.0) * self.tid**2
-        self.Pb       = pvt_model.calc_bubble_point
         self.fp       = fluid_properties
 
     # ------------------------------------------------------------------
@@ -52,25 +51,6 @@ class HagedornBrown:
         q_liquid_insitu = 5.615 * self.Ql * (self.fp["Bo"] * fo + self.fp["Bw"] * fw)
         self.fp["Vsl"]  = q_liquid_insitu / (86400.0 * self.Ap)
 
-        # ----------------------------------------------------------------
-        # BUG FIX — free gas calculation
-        # ----------------------------------------------------------------
-        # fp["glr"] must be the TOTAL surface producing GLR (scf / STB liquid),
-        # derived from Rsb (initial GOR), NOT from Rs (dissolved GOR at local P).
-        #
-        # The PVT dict previously stored glr = Rs/(1+wor), which equals gor*fo
-        # at every pressure, making free_gas_scf = Ql*(glr - gor*fo) = 0 always.
-        # With Vsg = 0 there is no gas phase: holdup = 1, mixture density =
-        # liquid density at every rate, and the only gradient that changes with
-        # rate is friction (∝ Vm²). That produces the monotonically-increasing
-        # Pwf curve seen in the plot — the U-shape requires gas gravity relief
-        # to dominate at low rates, which only appears when free gas is non-zero.
-        #
-        # Fix applied in BlackOilPVT.fluid_properties_dict:
-        #   "glr": Rsb / (1 + wor)   ← total surface GLR, constant with P
-        #   "gor": Rs                 ← dissolved portion, decreases below Pb
-        # Now below bubble point:  glr > gor*fo  =>  free_gas_scf > 0  ✓
-        # ----------------------------------------------------------------
         free_gas_scf   = max(0.0, self.Ql * (self.fp["glr"] - self.fp["gor"] * fo))
         q_gas_insitu   = (free_gas_scf
                           * (14.7 / self.fp["Pr"])
@@ -259,16 +239,6 @@ class HagedornBrown:
         * self.fp["mu_g"] ** (1.0 - Hl)
         )
 
-    # ── BUG FIX 1 ────────────────────────────────────────────────────────
-    # Original code used  2.2e-2 * Ql * fp["M"] / (tid * mu_m)
-    # which is dimensionally wrong (lbm²/day² in the numerator, not a
-    # velocity × density product). The correct oilfield Reynolds number is:
-    #
-    #   Re = 1488 * rho [lbm/ft³] * Vm [ft/s] * D [ft] / mu [cp]
-    #
-    # The constant 1488 converts:  (lbm/ft³)(ft/s)(ft) / cp  →  dimensionless
-    # i.e.  1 cp = 6.72e-4 lbm/(ft·s),  and  1/6.72e-4 ≈ 1488.
-    # ─────────────────────────────────────────────────────────────────────
         Re = (
         1488.0
         * self.fp["rho_ns"]   # [lbm/ft³]
@@ -280,17 +250,7 @@ class HagedornBrown:
     # Laminar regime — exact Hagen-Poiseuille result
         if Re < 2000:
             return 64.0 / max(Re, 1.0)
-
-    # ── BUG FIX 2 ────────────────────────────────────────────────────────
-    # Original code passed  self.roughness  (absolute roughness, ft) directly
-    # into the Jain log term.  Jain / Colebrook-White require the
-    # RELATIVE roughness  e/D  (dimensionless).  At typical values:
-    #
-    #   e = 0.0006 ft,  D = 0.2034 ft  →  e/D ≈ 0.00295
-    #
-    # Passing 0.0006 instead of 0.00295 gives a roughness ~5× too low,
-    # producing an underestimated friction factor in the turbulent regime.
-    # ─────────────────────────────────────────────────────────────────────
+        
         relative_roughness = self.roughness / self.tid   # dimensionless [ft/ft]
 
     # Jain (1976) explicit approximation — accurate to ±1 % for
@@ -375,6 +335,282 @@ class HagedornBrown:
         plt.show()
         return pressures[-1]
 
+    def plot_vlp_curve(self, Pth, surface_temp, bottomhole_temp,
+                       depth, Qmin, Qmax, step_size):
+        Pwf_points = []
+        rates = np.linspace(Qmin, Qmax, Qmax - Qmin)
+
+        for q in rates:
+            _, pressures = self.calculate_pressure_traverse(
+                Pth, surface_temp, bottomhole_temp, depth, step_size, q
+            )
+            Pwf_points.append(pressures[-1])
+
+        plt.plot(rates, Pwf_points, color='blue')
+        plt.xlabel('Liquid Rate (stb/day)')
+        plt.ylabel('Pwf (psi)')
+        plt.title('VLP Curve')
+        plt.grid(True)
+        plt.show()
+
+    def vlp_curve_plot_linear(self, Pth, depth, Qmin, Qmax, step_size):
+        """Simplified single-gradient VLP (stale PVT — approximate only)."""
+        Pwf_points = []
+        rates = np.linspace(Qmin, Qmax, int((Qmax - Qmin) / step_size))
+
+        for q in rates:
+            self.Ql = q
+            Pwf = Pth + self.calculate_gradient() * depth
+            Pwf_points.append(Pwf)
+
+        plt.plot(rates, Pwf_points, color='blue')
+        plt.xlabel('Liquid Rate (stb/day)')
+        plt.ylabel('Pwf (psi)')
+
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+class Beggs_Brill:
+    """
+    Calculates multiphase flow pressure gradients and VLP curves for wellbores
+    at any inclination angle using the Beggs and Brill (1973) correlation.
+    """
+    def __init__(self, tubing_id, tubing_od, casing_id, roughness, pvt_model,
+                 fluid_properties, watercut=0.0, theta=0.0):
+        """
+        Initializes the wellbore geometry and base PVT parameters.
+
+        Args:
+            tubing_id (float): Tubing inner diameter in feet (ft).
+            tubing_od (float): Tubing outer diameter in feet (ft).
+            casing_id (float): Casing inner diameter in feet (ft).
+            roughness (float): Absolute pipe roughness in feet (ft).
+            pvt_model (object): Instance of the BlackOilPVT class.
+            fluid_properties (dict): Initial dictionary of PVT properties.
+            watercut (float): Watercut as a decimal fraction (0.0 to 1.0).
+            theta (float): Well deviation from vertical in degrees (0 = vertical).
+        """
+        self.tid = tubing_id
+        self.tod = tubing_od
+        self.cid = casing_id
+        self.roughness = roughness
+        self.pvt_model = pvt_model 
+        self.wc = watercut
+        
+        # Convert deviation from vertical (UI) to radians
+        self.theta = (np.pi/2.0) - np.radians(theta) 
+        
+        self.Ap = (np.pi / 4.0) * self.tid**2
+        self.fp = fluid_properties 
+        self.Ql = 0.0
+
+    def _update_fluid_properties(self, P, T, Ql):
+        """
+        Updates the in-situ fluid properties and superficial velocities 
+        based on local pressure and temperature.
+        """
+        self.Ql = Ql
+        self.fp = self.pvt_model.fluid_properties_dict(
+            P, T, self.fp["Rsb"], self.wc
+        )
+        self._superficial_velocities()
+    
+    def _superficial_velocities(self):
+        """Calculates in-situ superficial velocities and no-slip liquid holdup (Cl)."""
+        fo = (1.0 - self.wc)
+        fw = self.wc
+
+        q_liquid_insitu = 5.615 * self.Ql * (self.fp["Bo"] * fo + self.fp["Bw"] * fw)
+        self.fp["Vsl"] = q_liquid_insitu / (86400.0 * self.Ap)
+
+        free_gas_scf = max(0.0, self.Ql * (self.fp["glr"] - self.fp["gor"] * fo))
+        q_gas_insitu = (free_gas_scf * (14.7 / self.fp["Pr"]) 
+                        * ((self.fp["Tr"] + 460.0) / 520.0) * self.fp["Z"])
+        
+        self.fp["Vsg"] = q_gas_insitu / (86400.0 * self.Ap)
+        self.fp["Vm"]  = self.fp["Vsl"] + self.fp["Vsg"]
+        
+        # No-slip liquid holdup
+        self.fp["Cl"] = self.fp["Vsl"] / max(self.fp["Vm"], 1e-6)
+
+    def _dimensionless_numbers(self):
+        """Calculates Beggs and Brill specific dimensionless groups."""
+        self._superficial_velocities()
+        Gm = self.fp["rho_l"] * self.fp["Vsl"] + self.fp["rho_g"] * self.fp["Vsg"]
+        
+        Cl = max(self.fp["Cl"], 1e-6) # Prevent divide-by-zero
+        L1 = 316.0 * Cl ** 0.302
+        L2 = 0.0009252 * Cl ** (-2.4684)
+        L3 = 0.1 * Cl ** (-1.4516)
+        L4 = 0.5 * Cl ** (-6.738)
+
+        # Froude Number
+        Nfr = (self.fp["Vm"]**2) / (32.174 * self.tid)
+
+        return Gm, L1, L2, L3, L4, Nfr
+    
+    def find_flow_pattern(self, L1, L2, L3, L4, Nfr):
+        """Determines the Beggs and Brill flow pattern (Segregated, Intermittent, Distributed, Transitional)."""
+        Cl = self.fp["Cl"]
+        if (Cl < 0.01 and Nfr < L1) or (Cl >= 0.01 and Nfr < L2):
+            return "segregated"
+        elif (Cl >= 0.01 and L2 <= Nfr <= L3):
+            return "transitional"
+        elif (0.01 <= Cl < 0.4 and L3 < Nfr <= L1) or (Cl >= 0.4 and L3 < Nfr <= L4):
+            return "intermittent"
+        elif (Cl < 0.4 and Nfr >= L1) or (Cl >= 0.4 and Nfr > L4):
+            return "distributed"
+        return "distributed" # Fallback
+        
+    def calculate_holdup(self, L1, L2, L3, L4, Nfr):
+        """
+        Calculates the actual liquid holdup fraction (Hl), including angle 
+        correction (psi) and transitional blending.
+        """
+        Cl = max(self.fp["Cl"], 1e-6)
+        Nlv = 1.938 * self.fp["Vsl"] * (self.fp["rho_l"] / max(self.fp["sigma_l"], 1e-6))**0.25
+        flow_pattern = self.find_flow_pattern(L1, L2, L3, L4, Nfr)
+        
+        # B&B uses angle from HORIZONTAL (0 = horizontal, 90 = vertical)
+        theta_h = (np.pi / 2.0) - self.theta 
+        sin_term = np.sin(1.8 * theta_h)
+
+        def get_C_and_Hl0(pattern):
+            if pattern == "segregated":
+                hl0 = 0.98 * (Cl**0.4846 / Nfr**0.0868)
+                c = (1 - Cl) * np.log(0.011 * Nlv**3.539 * Cl**(-3.768) * Nfr**(-1.614))
+            elif pattern == "intermittent":
+                hl0 = 0.845 * (Cl**0.5351 / Nfr**0.0173)
+                c = (1 - Cl) * np.log(2.96 * Nlv**(-0.4473) * Cl**0.305 * Nfr**(0.0978))
+            else: # distributed
+                hl0 = 1.065 * (Cl**0.5824 / Nfr**0.0609)
+                c = 0.0
+                
+            # PDF Constraints: Hl(0) >= Cl and C >= 0
+            return max(hl0, Cl), max(c, 0.0)
+
+        # Apply interpolation if falling between segregated and intermittent
+        if flow_pattern == "transitional":
+            hl0_seg, c_seg = get_C_and_Hl0("segregated")
+            psi_seg = 1.0 + c_seg * (sin_term - 0.333 * sin_term**3)
+            hl_seg = hl0_seg * psi_seg
+
+            hl0_int, c_int = get_C_and_Hl0("intermittent")
+            psi_int = 1.0 + c_int * (sin_term - 0.333 * sin_term**3)
+            hl_int = hl0_int * psi_int
+
+            A = (L3 - Nfr) / (L3 - L2)
+            Hl = A * hl_seg + (1.0 - A) * hl_int
+        else:
+            hl0, c = get_C_and_Hl0(flow_pattern)
+            psi = 1.0 + c * (sin_term - 0.333 * sin_term**3)
+            Hl = hl0 * psi
+
+        # PDF Final Modifications: Hl must be between Cl and 1.0
+        return max(Cl, min(Hl, 1.0))
+    
+    def frictional_factor(self, Gm, L1, L2, L3, L4, Nfr):
+        """Calculates the corrected two-phase friction factor and returns the actual Holdup."""
+        Cl = self.fp["Cl"]
+        rho_ns = self.fp["rho_l"] * Cl + self.fp["rho_g"] * (1 - Cl)
+        mu_ns = self.fp["mu_l"] * Cl + self.fp["mu_g"] * (1 - Cl)
+        
+        Re = 1488.0 * rho_ns * self.fp["Vm"] * self.tid / max(mu_ns, 1e-6)
+
+        if Re < 2000:
+            f = 64.0 / max(Re, 1.0)
+        else:
+            f = (1.14 - 2.0 * np.log10((self.roughness/self.tid) + 21.25 / (Re ** 0.9))) ** -2
+        
+        H_L = max(self.calculate_holdup(L1, L2, L3, L4, Nfr), 1e-6) 
+        y = max(Cl / (H_L ** 2), 1e-6)
+        ln_y = np.log(y)
+        
+        if 1.0 <= y <= 1.2:
+            S = np.log(2.2 * y - 1.2)
+        else:
+            denominator = -0.0523 + 3.182 * ln_y - 0.8725 * (ln_y ** 2) + 0.01853 * (ln_y ** 4)
+            S = ln_y / denominator
+            
+        f_prime = f * np.exp(S)
+        
+        # PDF Modification: Force approach gas at low liquid content
+        if Cl < 0.001:
+            f_prime = f
+            
+        return f_prime, H_L
+    
+    def calculate_gradient(self, P):
+        """
+        Calculates the total multiphase pressure gradient (psi/ft).
+        
+        Args:
+            P (float): Local node pressure in psia.
+            
+        Returns:
+            float: Pressure gradient (dp/dz) in psi/ft.
+        """
+        Gm, L1, L2, L3, L4, Nfr = self._dimensionless_numbers()
+        f_prime, Hl = self.frictional_factor(Gm, L1, L2, L3, L4, Nfr)
+        
+        rho_m = self.fp["rho_l"] * Hl + self.fp["rho_g"] * (1.0 - Hl)
+        gc = 32.174
+        
+        # Angle from horizontal for elevation calculation
+        theta_h = (np.pi / 2.0) - self.theta 
+        
+        hydrostatic = np.sin(theta_h) * rho_m
+        friction = (f_prime * Gm * self.fp["Vm"]) / (2.0 * gc * self.tid)
+        
+        # Kinetic energy term (Denominator unit correction applied: P * 144)
+        kinetic_term = 1.0 - (rho_m * self.fp["Vm"] * self.fp["Vsg"]) / (gc * P * 144.0)
+        
+        # Calculate total dp/dz (psf/ft) and divide by 144 for psi/ft
+        dp_dz = (hydrostatic + friction) / kinetic_term / 144.0
+        return dp_dz
+    
+    def calculate_pressure_traverse(self, Pth, surface_temp, bottomhole_temp,
+                                    total_depth, step_size, Ql):
+        """
+        Calculates the wellbore pressure profile via Euler integration.
+
+        Args:
+            Pth (float): Wellhead tubing pressure in psia.
+            surface_temp (float): Surface temperature in Fahrenheit (°F).
+            bottomhole_temp (float): Bottomhole temperature in Fahrenheit (°F).
+            total_depth (float): Total vertical depth of the well in feet (ft).
+            step_size (float): Depth integration step size in feet (ft).
+            Ql (float): Surface liquid flow rate in STB/day.
+
+        Returns:
+            tuple: (depths [ft], pressures [psia])
+        """
+        depths = [0.0]
+        pressures = [Pth]
+        current_P = Pth
+        current_depth = 0.0
+        temp_gradient = (bottomhole_temp - surface_temp) / total_depth
+
+        while current_depth < total_depth:
+            next_depth = min(current_depth + step_size, total_depth)
+            actual_step = next_depth - current_depth
+            current_temp = surface_temp + temp_gradient * current_depth
+
+            # Fixed: Call internal method properly
+            self._update_fluid_properties(current_P, current_temp, Ql)
+            dp_dz = self.calculate_gradient(current_P)
+            
+            current_P += dp_dz * actual_step
+            current_depth = next_depth
+
+            depths.append(current_depth)
+            pressures.append(current_P)
+
+        return depths, pressures
+    
     def plot_vlp_curve(self, Pth, surface_temp, bottomhole_temp,
                        depth, Qmin, Qmax, step_size):
         Pwf_points = []

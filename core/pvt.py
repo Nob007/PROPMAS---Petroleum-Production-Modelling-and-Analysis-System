@@ -189,11 +189,6 @@ class BlackOilPVT:
         """
         delta_T = T - 60.0
         bw = 1.0 + 1.2e-4 * delta_T + 1e-6 * (delta_T ** 2) - 3.33e-6 * P
-
-        # BUG FIX 3: The original clamp max(bw, 1.0) was wrong. At high pressure and
-        # low temperature, Bw can legitimately fall below 1.0 (compression dominates).
-        # Clamping to 1.0 in those conditions artificially inflates water volume and
-        # distorts density calculations. Use a physically reasonable lower bound instead.
         return max(bw, 0.9)
 
     def calc_density_oil(self, Rs, Bo):
@@ -345,6 +340,24 @@ class BlackOilPVT:
         return (self.sg_o * 350.52 / (1 + self.wor)
                 + self.sg_w * 350.52 * self.wor / (1 + self.wor)
                 + self.sg_g * 0.0764 * glr)
+    
+    def rsb_from_test(self, Rs_test, Pwf_test, Pb, T):
+        """
+        Calculates bubble-point gor from test data.
+        Args:
+            Rs_test: GOR at test condition, scf/stb
+            Pwf_test: Wellbore pressure at test condition, psia
+            Pb: Bubble-point pressure, psia
+            T: Test temperature, Farenheit
+        Returns:
+            Rsb: GOR at bubble-point, scf/stb
+        """
+        if Pwf_test >= Pb:
+            return Rs_test          # test point already saturated -> Rs_test IS Rsb
+        a = 0.00091 * T - 0.0125 * self.api
+        shape_at_test = self.sg_g * (((Pwf_test / 18.2) + 1.4) * (10 ** -a)) ** 1.2048
+        shape_at_pb   = self.sg_g * (((Pb / 18.2) + 1.4) * (10 ** -a)) ** 1.2048
+        return Rs_test * (shape_at_pb / shape_at_test)
 
     def fluid_properties_dict(self, P, T, Rsb, Pb=0):
         """
@@ -390,11 +403,6 @@ class BlackOilPVT:
         sigma_o = self.calc_surface_tension_oil(P, T)
         sigma_w = self.calc_surface_tension_water(T)
 
-        # BUG FIX 5: rho_l was blended using surface fractions (fo, fw) instead of
-        # in-situ volume fractions (fo_insitu, fw_insitu). Because Bo expands oil
-        # volume and Bw compresses/expands water volume relative to surface, the
-        # correct mixture density requires reservoir-condition fractions.
-        # Also, the original water density term (62.4*sg_w) was not divided by Bw.
         rho_l = rho_o * fo_insitu + rho_w * fw_insitu
 
         # Viscosity and surface tension: blended with surface fractions per H-B convention
@@ -406,10 +414,6 @@ class BlackOilPVT:
             "Pb": Pb,
             "Rsb": Rsb,
             "gor": Rs,
-            # GLR = total surface producing GLR (scf / STB liquid).
-            # Must use Rsb (initial producing GOR at surface), NOT Rs (dissolved at local P).
-            # Using Rs here would make glr == gor at every step, so free_gas_scf = 0 always,
-            # eliminating the gas phase and destroying the U-shape of the VLP curve.
             "glr": Rsb / (1.0 + self.wor),
             "rho_l": rho_l,
             "rho_g": self.calc_density_gas(P, T, Z),
