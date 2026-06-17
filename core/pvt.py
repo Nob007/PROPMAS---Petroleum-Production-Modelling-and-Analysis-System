@@ -341,6 +341,15 @@ class BlackOilPVT:
                 + self.sg_w * 350.52 * self.wor / (1 + self.wor)
                 + self.sg_g * 0.0764 * glr)
     
+    def calc_true_rsb(self, Pb, T_res):
+        """
+        Calculates the theoretical Solution GOR (Rsb) at the bubble point.
+        """
+        if Pb <= 14.7: return 0.0
+        a = 0.00091 * T_res - 0.0125 * self.api
+        rsb = self.sg_g * (((Pb / 18.2) + 1.4) * (10 ** -a)) ** 1.2048
+        return rsb
+    
     def rsb_from_test(self, Rs_test, Pwf_test, Pb, T):
         """
         Calculates bubble-point gor from test data.
@@ -359,7 +368,7 @@ class BlackOilPVT:
         shape_at_pb   = self.sg_g * (((Pb / 18.2) + 1.4) * (10 ** -a)) ** 1.2048
         return Rs_test * (shape_at_pb / shape_at_test)
 
-    def fluid_properties_dict(self, P, T, Rsb, Pb=0):
+    def fluid_properties_dict(self, P, T, Rsb, producing_gor, Pb=0):
         """
         Calculates all fluid properties at a specific pressure and temperature node.
         Correctly blends oil and water properties based on in-situ volume fractions.
@@ -374,7 +383,7 @@ class BlackOilPVT:
             dict: A dictionary containing all blended liquid and gas properties required
                   by multiphase flow correlations like Hagedorn-Brown.
         """
-        Pb = self.calc_bubble_point(T, Rsb) if Pb == 0 else Pb
+        Pb = Pb if Pb!=0 else self.calc_bubble_point(T, Rsb)
 
         Rs = self.calc_rs(P, T, Pb, Rsb)
         Z = self.calculate_dak_z_factor(P, T, self.sg_g)
@@ -384,18 +393,13 @@ class BlackOilPVT:
         Bw = self.calc_bw(P, T)
         Bg = self.calc_bg(P, T, Z)
 
-        # Surface volume fractions (used for viscosity and surface tension blending,
-        # consistent with H-B correlation literature)
         fo = 1.0 / (1.0 + self.wor)
         fw = self.wor / (1.0 + self.wor)
 
-        # In-situ volume fractions (used for density blending)
-        # These account for the reservoir FVF of each phase.
         total_res_vol = Bo + self.wor * Bw
         fo_insitu = Bo / total_res_vol
         fw_insitu = (self.wor * Bw) / total_res_vol
 
-        # Pure phase properties
         rho_o = self.calc_density_oil(Rs, Bo)
         rho_w = 62.4 * self.sg_w / Bw
         mu_o = self.calc_viscosity_oil(P, T, Rs, Pb)
@@ -404,8 +408,6 @@ class BlackOilPVT:
         sigma_w = self.calc_surface_tension_water(T)
 
         rho_l = rho_o * fo_insitu + rho_w * fw_insitu
-
-        # Viscosity and surface tension: blended with surface fractions per H-B convention
         mu_l = mu_o * fo + mu_w * fw
         sigma_l = sigma_o * fo + sigma_w * fw
 
@@ -413,15 +415,16 @@ class BlackOilPVT:
             "M": M,
             "Pb": Pb,
             "Rsb": Rsb,
+            "producing_gor": producing_gor, # Lock the true UI input here
             "gor": Rs,
-            "glr": Rsb / (1.0 + self.wor),
+            "glr": producing_gor / (1.0 + self.wor), # Proper constant GLR
             "rho_l": rho_l,
             "rho_g": self.calc_density_gas(P, T, Z),
             "mu_l": mu_l,
             "mu_g": self.calc_viscosity_gas(P, T, Z),
             "sigma_l": sigma_l,
             "Bo": Bo,
-            "Bg": Bg,   # ft³/scf
+            "Bg": Bg,
             "Bw": Bw,
             "Pr": P,
             "Tr": T,

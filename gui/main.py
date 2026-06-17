@@ -14,6 +14,7 @@ Layout (spec §2):
 
 from __future__ import annotations
 
+import csv
 import os
 import sys
 import traceback
@@ -39,7 +40,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFontDatabase
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
+    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout,
     QLabel, QListView, QMainWindow, QPushButton, QScrollArea, QSizePolicy, # <-- Added QListView
     QSpinBox, QSplitter, QStatusBar, QToolButton, QVBoxLayout,
     QWidget,
@@ -227,8 +228,8 @@ def _build_pvt_vlp(p: dict) -> tuple[BlackOilPVT, HagedornBrown]:
         sg_water=p["sg_water"], watercut=p["wc"]
     )
     # Initial fluid properties at tubing head conditions
-    Rsb = pvt.rsb_from_test(p["gor"], p["thp"], p["Pb"], p["T_surface"])
-    fp0 = pvt.fluid_properties_dict(p["thp"], p["T_surface"], Rsb, p["Pb"])
+    Rsb = p["gor"] #pvt.calc_true_rsb(p["Pb"], p["T_bh"])
+    fp0 = pvt.fluid_properties_dict(p["thp"], p["T_surface"], Rsb, p["gor"], p["Pb"])
     if p["model"] == "Hagedron-Brown":
         vlp = HagedornBrown(
             tubing_id=p["tubing_id"], tubing_od=p["tubing_od"],
@@ -334,6 +335,7 @@ class AnalysisWorker(QRunnable):
             }
             traverse_depths: list = []
             traverse_pressures: list = []
+            fp_op: dict = {}
 
             q_lo, q_hi = float(p["q_min"]), float(p["q_max"])
 
@@ -384,6 +386,24 @@ class AnalysisWorker(QRunnable):
                             bottomhole_temp=p["T_bh"], total_depth=p["depth"],
                             step_size=p["dz_step"], Ql=q_star,
                         )
+                        
+                        # Get PVT properties at operating point
+                        pvt_model = vlp.pvt_model
+                        rsb_true = pvt_model.calc_true_rsb(p["Pb"], p["T_bh"])
+                        fp_op = pvt_model.fluid_properties_dict(p_star, p["T_bh"], rsb_true, p["gor"], p["Pb"])
+                        
+                        print("\n" + "="*50)
+                        print(f"OPERATING POINT PVT PROPERTIES (Pwf={p_star:.1f} psia, T={p['T_bh']:.1f} °F):")
+                        for k, v in fp_op.items():
+                            print(f"  {k}: {v}")
+                        print("="*50)
+                        
+                        print("\n" + "="*50)
+                        print(f"OPERATING POINT TRAVERSE DATA (q={q_star:.1f} STB/d):")
+                        print(f"{'Depth (ft)':>15} | {'Pressure (psia)':>15}")
+                        for d, p_trav in zip(traverse_depths, traverse_pressures):
+                            print(f"{d:>15.1f} | {p_trav:>15.1f}")
+                        print("="*50 + "\n")
             except Exception as solve_err:
                 sol["message"] = str(solve_err)
 
@@ -395,6 +415,7 @@ class AnalysisWorker(QRunnable):
                 "sol":                sol,
                 "traverse_depths":    list(traverse_depths),
                 "traverse_pressures": list(traverse_pressures),
+                "fp_op":              fp_op,
             })
 
         except Exception:
@@ -616,7 +637,7 @@ class ChartWidget(QWidget):
         # ── navigation toolbar ──────────────────────────────────────────────
         self.toolbar = NavToolbar(self.canvas, self)
         self.toolbar.setStyleSheet(
-            f"QToolBar {{ background: {C_OFF_WHITE}; border-bottom: 1px solid {C_BORDER}; }}"
+            f"QToolBar {{ background: {C_BLUE}; border-bottom: 1px solid {C_BORDER}; }}"
             "QToolButton { background: transparent; border-radius: 4px; padding: 2px; }"
             f"QToolButton:hover {{ background: {C_BLUE_LIGHT}; }}")
 
@@ -871,9 +892,9 @@ class IprSection(QWidget):
 
         # Inputs
         self.pr  = _dspin(2500.0, 0, 20000, 50,  2)
-        self.pwf = _dspin(1000.0, 0, 20000, 50,  2)
-        self.pb  = _dspin(2800.0, 0, 20000, 50,  2)
-        self.qt  = _dspin(500.0,  0, 50000, 50,  2)
+        self.pwf = _dspin(1200.0, 0, 20000, 50,  2)
+        self.pb  = _dspin(1800.0, 0, 20000, 50,  2)
+        self.qt  = _dspin(800.0,  0, 50000, 50,  2)
 
         lay.addWidget(_row("Pr",          self.pr,  "psia"))
         self._pb_row = _row("Pb",         self.pb,  "psia")
@@ -954,10 +975,10 @@ class FluidSection(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
-        self.sg_o = _dspin(0.82,  0.60, 1.10, 0.005, 3)
-        self.sg_g = _dspin(0.915, 0.55, 1.50, 0.005, 3)
-        self.sg_w = _dspin(1.07,  0.98, 1.20, 0.005, 3)
-        self.wc  = _dspin(0.0,   0.0,  1.0, 0.1,   2)
+        self.sg_o = _dspin(0.85,  0.50, 1.10, 0.005, 3)
+        self.sg_g = _dspin(0.65, 0.35, 1.50, 0.005, 3)
+        self.sg_w = _dspin(1.07,  0.90, 1.20, 0.005, 3)
+        self.wc  = _dspin(0.33,   0.0,  1.0, 0.1,   2)
 
         lay.addWidget(_row("SG Oil",   self.sg_o, "(w=1)"))
         lay.addWidget(_row("SG Gas",   self.sg_g, "(air=1)"))
@@ -1007,12 +1028,12 @@ class VlpSection(QWidget):
         self.tid   = _dspin(2.441, 0.5, 5.5,    0.1,  3)
         self.tod   = _dspin(2.875, 0.5, 6,    0.1,  3)
         self.cid   = _dspin(5.5, 0.10, 20.5,    0.1,  3)
-        self.rough = _dspin(0.0006, 0.0,  1,    0.0001, 5)
-        self.thp   = _dspin(346.6,  0.0,  5000.0,  10.0,   1)
-        self.depth = _dspin(8244.0, 100,  30000,   50.0,   1)
-        self.t_sf  = _dspin(80.0,   -20,  200,     1.0,    1)
-        self.t_bh  = _dspin(130.0,  50,   400,     1.0,    1)
-        self.gor   = _dspin(480.0,  0,    10000,   10.0,   1)
+        self.rough = _dspin(0.00000, 0.0,  1,    0.0001, 5)
+        self.thp   = _dspin(150.0,  0.0,  5000.0,  10.0,   1)
+        self.depth = _dspin(6000.0, 100,  30000,   50.0,   1)
+        self.t_sf  = _dspin(100.0,   -20,  200,     1.0,    1)
+        self.t_bh  = _dspin(200.0,  50,   400,     1.0,    1)
+        self.gor   = _dspin(500.0,  0,    10000,   10.0,   1)
         self.theta = _dspin(0.0,    0,    90,      1.0,    1)
 
         lay.addWidget(_row("Tubing ID",  self.tid,   "in"))
@@ -1180,6 +1201,11 @@ class TitleBar(QWidget):
         lay.addWidget(sub)
         lay.addStretch()
 
+        self.export_btn = QPushButton("💾  Export CSV")
+        self.export_btn.setObjectName("run_btn")
+        self.export_btn.setEnabled(False)
+        lay.addWidget(self.export_btn)
+
         # Run button (spec §4)
         self.run_btn = QPushButton("▶  Run Analysis")
         self.run_btn.setObjectName("run_btn")
@@ -1258,6 +1284,7 @@ class MainWindow(QMainWindow):
 
         # ── §4 Title bar ─────────────────────────────────────────────────────
         self.tbar = TitleBar()
+        self.tbar.export_btn.clicked.connect(self.export_csv)
         self.tbar.run_clicked.connect(self.run_analysis)
         root.addWidget(self.tbar)
 
@@ -1299,6 +1326,7 @@ class MainWindow(QMainWindow):
     def run_analysis(self) -> None:
         params = self.sidebar.all_values()
         self.tbar.run_btn.setEnabled(False)
+        self.tbar.export_btn.setEnabled(False)
         self._status("⏳  Computing…", C_BLUE)
 
         worker = AnalysisWorker(params)
@@ -1310,6 +1338,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object)
     def _on_result(self, data: dict) -> None:
         self.tbar.run_btn.setEnabled(True)
+        self.tbar.export_btn.setEnabled(True)
+        self.last_data = data
         self.chart.plot(data)
         sol = data["sol"]
 
@@ -1358,6 +1388,62 @@ class MainWindow(QMainWindow):
         self._status(
             f"✅  Sensitivity complete — {len(results)} curves overlaid.", C_INK)
 
+    # ── Export CSV ────────────────────────────────────────────────────────────
+
+    def export_csv(self) -> None:
+        if not hasattr(self, 'last_data') or not self.last_data:
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "", "CSV Files (*.csv)")
+        if not file_path:
+            return
+            
+        data = self.last_data
+        try:
+            with open(file_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                
+                sol = data["sol"]
+                writer.writerow(["--- OPERATING POINT ---"])
+                if sol["success"]:
+                    writer.writerow(["Rate (STB/d)", "Pwf (psia)", "Stability"])
+                    if sol.get("all_points"):
+                        for pt in sol["all_points"]:
+                            writer.writerow([pt[0], pt[1], pt[2]])
+                    else:
+                        writer.writerow([sol["operating_rate"], sol["operating_pwf"], "Unknown"])
+                else:
+                    writer.writerow(["Status", "No valid operating point found."])
+                writer.writerow([])
+                
+                if "fp_op" in data and data["fp_op"]:
+                    writer.writerow(["--- PVT PROPERTIES AT OPERATING POINT ---"])
+                    writer.writerow(["Property", "Value"])
+                    for k, v in data["fp_op"].items():
+                        writer.writerow([k, v])
+                    writer.writerow([])
+                    
+                writer.writerow(["--- IPR CURVE ---"])
+                writer.writerow(["Rate (STB/d)", "Pwf (psia)"])
+                for q, p in zip(data["rates_ipr"], data["pwf_ipr"]):
+                    writer.writerow([q, p])
+                writer.writerow([])
+                
+                writer.writerow(["--- VLP CURVE ---"])
+                writer.writerow(["Rate (STB/d)", "Pwf (psia)"])
+                for q, p in zip(data["rates_vlp"], data["pwf_vlp"]):
+                    writer.writerow([q, p])
+                writer.writerow([])
+                
+                if data.get("traverse_depths"):
+                    writer.writerow(["--- TRAVERSE DATA AT OPERATING POINT ---"])
+                    writer.writerow(["Depth (ft)", "Pressure (psia)"])
+                    for d, p in zip(data["traverse_depths"], data["traverse_pressures"]):
+                        writer.writerow([d, p])
+                        
+            self._status(f"✅  Data successfully exported to {file_path}", C_INK)
+        except Exception as e:
+            self._status(f"❌  Export failed: {str(e)}", "#B71C1C")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT

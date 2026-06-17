@@ -29,7 +29,7 @@ class HagedornBrown:
     def update_fluid_properties(self, P, T, Ql):
         self.Ql = Ql
         self.fp = self.pvt_model.fluid_properties_dict(
-            P, T, self.fp["Rsb"], self.fp["Pb"]
+            P, T, self.fp["Rsb"], self.fp["producing_gor"], self.fp["Pb"]
         )
 
     # ------------------------------------------------------------------
@@ -156,16 +156,41 @@ class HagedornBrown:
         Returns:
             float: Liquid holdup (0.0 – 1.0).
         """
+        # Ngv_safe = max(Ngv, 1e-6)
+
+        # H = ((Nlv / (Ngv_safe ** 0.575))
+        #      * (self.fp["Pr"] / 14.7) ** 0.1
+        #      * (CNl / Nd))
+        
+        # H = max(H, 5e-3)
+
+        # Hl_psi = np.sqrt(
+        #     (0.0047 + 1123.32 * H + 729489.64 * H ** 2)
+        #     / (1.0 + 1097.1566 * H + 722153.97 * H ** 2)
+        # )
         Ngv_safe = max(Ngv, 1e-6)
 
+        # 1. Calculate the correlating parameter H (The X-axis of the original chart)
         H = ((Nlv / (Ngv_safe ** 0.575))
              * (self.fp["Pr"] / 14.7) ** 0.1
              * (CNl / Nd))
 
-        Hl_psi = np.sqrt(
-            (0.0047 + 1123.32 * H + 729489.64 * H ** 2)
-            / (1.0 + 1097.1566 * H + 722153.97 * H ** 2)
-        )
+        # ------------------------------------------------------------------
+        # THE FIX: Digitized Hagedorn-Brown Chart Lookup
+        # ------------------------------------------------------------------
+        
+        # X-axis data points (H parameter)
+        chart_H = np.array([
+            0.001, 0.002, 0.004, 0.01, 0.02, 0.04, 0.1, 0.2, 0.4, 1.0, 2.0, 4.0, 10.0
+        ])
+        
+        # Y-axis data points (Hl/psi parameter) read directly from the original publication
+        chart_Hl_psi = np.array([
+            0.015, 0.028, 0.048, 0.095, 0.160, 0.260, 0.440, 0.600, 0.770, 0.920, 0.980, 0.995, 1.000
+        ])
+
+        # numpy.interp naturally flatlines if H drops below 0.001 or exceeds 10.0
+        Hl_psi = np.interp(H, chart_H, chart_Hl_psi)
 
         B = Ngv * (Nlv ** 0.38) / (Nd ** 2.14)
         if B <= 0.025:
@@ -203,8 +228,21 @@ class HagedornBrown:
 
         if self.is_bubble_flow():
             return self.griffith_holdup()
-        else:
-            return self.liquid_holdup(Nl, CNl, Nlv, Ngv, Nd)
+
+        Hl = self.liquid_holdup(Nl, CNl, Nlv, Ngv, Nd)
+
+        # Physical floor: holdup can never fall below the no-slip value —
+        # slip between phases can only increase liquid holdup, never decrease it.
+        Cl = self.fp["Vsl"] / max(self.fp["Vm"], 1e-6)
+        Hl = max(Hl, Cl)
+
+        # Re-blend mixture properties since liquid_holdup() set them using
+        # the unfloored Hl
+        self.fp["rho_m"] = self.fp["rho_l"] * Hl + self.fp["rho_g"] * (1.0 - Hl)
+        self.fp["mu_m"]  = (self.fp["mu_l"] ** Hl) * (self.fp["mu_g"] ** (1.0 - Hl))
+
+        # return 0.7 * Hl + 0.3 * self.griffith_holdup()
+        return Hl
 
     # ------------------------------------------------------------------
     # Friction factor  (Jain / Colebrook approximation)
@@ -280,7 +318,8 @@ class HagedornBrown:
 
         dp_dh_el   = self.fp["rho_m"] * np.cos(self.theta) / 144.0
         gc         = 32.174
-        dp_dh_fric = (f * self.fp["rho_ns"] * self.fp["Vm"] ** 2) / (2.0 * gc * self.tid * 144.0)
+        # dp_dh_fric = (f * self.fp["rho_ns"] * self.fp["Vm"] ** 2) / (2.0 * gc * self.tid * 144.0)
+        dp_dh_fric = (f * self.Ql**2 * self.fp["M"]**2 )/(2.9652 * 10**11 * self.tid**5 * self.fp["rho_m"] * 144)
 
         return dp_dh_el + dp_dh_fric
 
@@ -399,13 +438,13 @@ class Beggs_Brill:
         self.roughness = roughness
         self.pvt_model = pvt_model 
         self.wc = watercut
-        
-        # Convert deviation from vertical (UI) to radians
-        self.theta = (np.pi/2.0) - np.radians(theta) 
-        
         self.Ap = (np.pi / 4.0) * self.tid**2
         self.fp = fluid_properties 
         self.Ql = 0.0
+        
+        # CORRECTED ANGLE LOGIC
+        self.theta_ui = theta                 # UI deviation from vertical (0=vertical)
+        self.theta_rad = np.radians(theta)    # Radians for gravity (cos(0) = 1)
 
     def _update_fluid_properties(self, P, T, Ql):
         """
@@ -414,7 +453,7 @@ class Beggs_Brill:
         """
         self.Ql = Ql
         self.fp = self.pvt_model.fluid_properties_dict(
-            P, T, self.fp["Rsb"], self.wc
+            P, T, self.fp["Rsb"], self.fp["producing_gor"], self.fp["Pb"]
         )
         self._superficial_velocities()
     
@@ -474,8 +513,8 @@ class Beggs_Brill:
         Nlv = 1.938 * self.fp["Vsl"] * (self.fp["rho_l"] / max(self.fp["sigma_l"], 1e-6))**0.25
         flow_pattern = self.find_flow_pattern(L1, L2, L3, L4, Nfr)
         
-        # B&B uses angle from HORIZONTAL (0 = horizontal, 90 = vertical)
-        theta_h = (np.pi / 2.0) - self.theta 
+        # B&B specifically requires angle from HORIZONTAL for the correction
+        theta_h = np.radians(90.0 - self.theta_ui)
         sin_term = np.sin(1.8 * theta_h)
 
         def get_C_and_Hl0(pattern):
@@ -485,31 +524,24 @@ class Beggs_Brill:
             elif pattern == "intermittent":
                 hl0 = 0.845 * (Cl**0.5351 / Nfr**0.0173)
                 c = (1 - Cl) * np.log(2.96 * Nlv**(-0.4473) * Cl**0.305 * Nfr**(0.0978))
-            else: # distributed
+            else:
                 hl0 = 1.065 * (Cl**0.5824 / Nfr**0.0609)
                 c = 0.0
-                
-            # PDF Constraints: Hl(0) >= Cl and C >= 0
             return max(hl0, Cl), max(c, 0.0)
 
-        # Apply interpolation if falling between segregated and intermittent
         if flow_pattern == "transitional":
             hl0_seg, c_seg = get_C_and_Hl0("segregated")
-            psi_seg = 1.0 + c_seg * (sin_term - 0.333 * sin_term**3)
-            hl_seg = hl0_seg * psi_seg
+            hl_seg = hl0_seg * (1.0 + c_seg * (sin_term - 0.333 * sin_term**3))
 
             hl0_int, c_int = get_C_and_Hl0("intermittent")
-            psi_int = 1.0 + c_int * (sin_term - 0.333 * sin_term**3)
-            hl_int = hl0_int * psi_int
+            hl_int = hl0_int * (1.0 + c_int * (sin_term - 0.333 * sin_term**3))
 
             A = (L3 - Nfr) / (L3 - L2)
             Hl = A * hl_seg + (1.0 - A) * hl_int
         else:
             hl0, c = get_C_and_Hl0(flow_pattern)
-            psi = 1.0 + c * (sin_term - 0.333 * sin_term**3)
-            Hl = hl0 * psi
+            Hl = hl0 * (1.0 + c * (sin_term - 0.333 * sin_term**3))
 
-        # PDF Final Modifications: Hl must be between Cl and 1.0
         return max(Cl, min(Hl, 1.0))
     
     def frictional_factor(self, Gm, L1, L2, L3, L4, Nfr):
@@ -537,7 +569,7 @@ class Beggs_Brill:
             
         f_prime = f * np.exp(S)
         
-        # PDF Modification: Force approach gas at low liquid content
+        # # PDF Modification: Force approach gas at low liquid content
         if Cl < 0.001:
             f_prime = f
             
@@ -559,16 +591,11 @@ class Beggs_Brill:
         rho_m = self.fp["rho_l"] * Hl + self.fp["rho_g"] * (1.0 - Hl)
         gc = 32.174
         
-        # Angle from horizontal for elevation calculation
-        theta_h = (np.pi / 2.0) - self.theta 
-        
-        hydrostatic = np.sin(theta_h) * rho_m
+        # CORRECTED ELEVATION LOGIC: Vertical well = theta_rad is 0 -> cos(0) = 1 (Full gravity)
+        hydrostatic = np.cos(self.theta_rad) * rho_m
         friction = (f_prime * Gm * self.fp["Vm"]) / (2.0 * gc * self.tid)
-        
-        # Kinetic energy term (Denominator unit correction applied: P * 144)
         kinetic_term = 1.0 - (rho_m * self.fp["Vm"] * self.fp["Vsg"]) / (gc * P * 144.0)
         
-        # Calculate total dp/dz (psf/ft) and divide by 144 for psi/ft
         dp_dz = (hydrostatic + friction) / kinetic_term / 144.0
         return dp_dz
     
