@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 *.spec
+*.exe
 
 # User session files
 # ------------------
@@ -22,3 +23,5 @@ dist/
 # Virtual Environments
 venv/
 .env
+
+file_structure.txt

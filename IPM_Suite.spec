@@ -51,5 +51,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='gui/icon.ico',  # ← uncomment and supply icon.ico to add an icon
+    icon='assets/icon.ico',  # ← uncomment and supply icon.ico to add an icon
 )

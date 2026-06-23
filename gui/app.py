@@ -53,6 +53,7 @@ from core import vlp as vlp_module
 from core.vlp import HagedornBrown, Beggs_Brill
 from core.solver_other import find_operating_points, NodalResult, StabilityType
 
+from calibration.calibrate import VLPCalibrator
 # ─────────────────────────────────────────────────────────────────────────────
 #  DESIGN TOKENS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -712,6 +713,69 @@ class SensitivityWorker(BaseWorker):
             self.signals.finished.emit(results_by_slot)
         except Exception as e:
             self.signals.error.emit(f"Sensitivity failed:\n{traceback.format_exc()}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CALIBRATION WORKER
+# ─────────────────────────────────────────────────────────────────────────────
+class CalibrationWorker(BaseWorker):
+    def __init__(self, state: AppState, measured_data: list):
+        super().__init__()
+        self._state = copy.deepcopy(state)
+        self._measured_data = measured_data
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            s = self._state
+            self.signals.progress.emit(5, "Building models...")
+            pvt = build_pvt(s)
+            fp = get_fp(s, pvt)
+            base_vlp, err = build_vlp(s, pvt, fp)
+            if base_vlp is None:
+                self.signals.error.emit(f"VLP build error: {err}")
+                return
+
+            # Define traverse params for the calibrator
+            # Use a representative rate for calibration, e.g., the test rate
+            q_calib = s.Qo_test or 1000.0
+            traverse_params = {
+                "Pth": s.thp, "surface_temp": s.T_surface,
+                "bottomhole_temp": s.T_bh, "total_depth": s.depth,
+                "step_size": s.dz_step, "Ql": q_calib
+            }
+
+            # Unpack measured data
+            measured_depths, measured_pressures = zip(*self._measured_data)
+
+            # Run original traverse for comparison
+            self.signals.progress.emit(20, "Running base traverse...")
+            orig_depths, orig_pressures, _ = base_vlp.calculate_pressure_traverse(**traverse_params)
+
+            # Run calibrator
+            self.signals.progress.emit(40, "Optimizing factors...")
+            calibrator = VLPCalibrator(base_vlp, traverse_params)
+            result = calibrator.run(measured_depths, measured_pressures)
+
+            calib_depths, calib_pressures = None, None
+            if result.success:
+                self.signals.progress.emit(80, "Running calibrated traverse...")
+                calibrated_model = calibrator.calibrated_model
+                calib_depths, calib_pressures, _ = calibrated_model.calculate_pressure_traverse(**traverse_params)
+
+            self.signals.progress.emit(100, "Done")
+            self.signals.finished.emit({
+                "result": result,
+                "measured_depths": measured_depths,
+                "measured_pressures": measured_pressures,
+                "original_traverse": (orig_depths, orig_pressures),
+                "calibrated_traverse": (calib_depths, calib_pressures) if result.success else None,
+            })
+
+        except Exception as e:
+            self.signals.error.emit(f"Calibration failed:\n{traceback.format_exc()}")
+
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  COMMON WIDGETS
@@ -1723,6 +1787,155 @@ class SensitivityPanel(QDialog):
             QMessageBox.information(self, "Exported", f"Plot saved to {path}")
         except Exception as e:
             QMessageBox.warning(self, "Export Error", f"Could not save plot: {e}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CALIBRATION PANEL
+# ─────────────────────────────────────────────────────────────────────────────
+class CalibrationPanel(QDialog):
+    def __init__(self, state: AppState, parent=None):
+        super().__init__(parent)
+        self.state = state
+        self.setWindowTitle("VLP Calibration")
+        self.setMinimumSize(1100, 720)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        main = QHBoxLayout(self)
+        main.setContentsMargins(20, 20, 20, 20)
+        main.setSpacing(20)
+
+        # Left: Data input and results
+        left_l = QVBoxLayout()
+        left_l.addWidget(SectionHeader("VLP Calibration", "Match model to measured data"))
+
+        # Data table
+        left_l.addWidget(make_label("MEASURED PRESSURE SURVEY"))
+        self.table = QTableWidget(5, 2)
+        self.table.setHorizontalHeaderLabels(["Depth (ft)", "Pressure (psia)"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Add sample data
+        sample_data = [("0", str(self.state.thp or "200")), ("2000", "850"), ("4000", "1300"), ("6000", "1650"), (str(self.state.depth or "8000"), "1950")]
+        for r, (d, p) in enumerate(sample_data):
+            self.table.setItem(r, 0, QTableWidgetItem(d))
+            self.table.setItem(r, 1, QTableWidgetItem(p))
+        left_l.addWidget(self.table)
+
+        table_tools = QHBoxLayout()
+        add_row_btn = QPushButton("＋ Add Row"); add_row_btn.setObjectName("secondary")
+        add_row_btn.clicked.connect(lambda: self.table.insertRow(self.table.rowCount()))
+        rem_row_btn = QPushButton("－ Remove Row"); rem_row_btn.setObjectName("secondary")
+        rem_row_btn.clicked.connect(lambda: self.table.removeRow(self.table.currentRow()))
+        table_tools.addWidget(add_row_btn); table_tools.addWidget(rem_row_btn)
+        left_l.addLayout(table_tools)
+
+        # Results
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setStyleSheet(f"color: {BLUE_M};")
+        left_l.addWidget(sep)
+        left_l.addWidget(make_label("CALIBRATION RESULTS"))
+
+        self.holdup_factor_lbl = QLabel("—"); self.holdup_factor_lbl.setObjectName("kpi_value")
+        self.friction_factor_lbl = QLabel("—"); self.friction_factor_lbl.setObjectName("kpi_value")
+        
+        results_grid = QGridLayout()
+        results_grid.addWidget(make_label("Holdup Factor", style="kpi_label"), 0, 0)
+        results_grid.addWidget(self.holdup_factor_lbl, 1, 0)
+        results_grid.addWidget(make_label("Friction Factor", style="kpi_label"), 0, 1)
+        results_grid.addWidget(self.friction_factor_lbl, 1, 1)
+        left_l.addLayout(results_grid)
+
+        self.calib_error_lbl = QLabel("")
+        self.calib_error_lbl.setStyleSheet(f"color:{WARNING}; font-size:11px;")
+        self.calib_error_lbl.setWordWrap(True)
+        left_l.addWidget(self.calib_error_lbl)
+        left_l.addStretch()
+
+        self.run_btn = QPushButton("▶  Run Calibration")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.clicked.connect(self._run)
+        left_l.addWidget(self.run_btn)
+
+        self.progress = QProgressBar(); self.progress.setVisible(False)
+        left_l.addWidget(self.progress)
+
+        left_w = QWidget()
+        left_w.setLayout(left_l)
+        left_w.setFixedWidth(380)
+        main.addWidget(left_w)
+
+        # Right: Chart
+        right_l = QVBoxLayout()
+        right_l.addWidget(make_label("CALIBRATION PLOT"))
+        self.chart = MatplotlibWidget(figsize=(6, 5))
+        right_l.addWidget(self.chart, 1)
+        main.addLayout(right_l, 1)
+
+    def _run(self):
+        # Collect data from table
+        data = []
+        for r in range(self.table.rowCount()):
+            try:
+                depth = float(self.table.item(r, 0).text())
+                pressure = float(self.table.item(r, 1).text())
+                data.append((depth, pressure))
+            except (ValueError, AttributeError):
+                continue # Skip empty/invalid rows
+        
+        if len(data) < 2:
+            self.calib_error_lbl.setText("⚠ Need at least 2 valid data points.")
+            return
+
+        self.calib_error_lbl.setText("")
+        self.run_btn.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+
+        worker = CalibrationWorker(self.state, data)
+        worker.signals.finished.connect(self._on_done)
+        worker.signals.error.connect(self._on_error)
+        worker.signals.progress.connect(lambda p, m: self.progress.setValue(p))
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_error(self, msg):
+        self.run_btn.setEnabled(True)
+        self.progress.setVisible(False)
+        self.calib_error_lbl.setText(f"Error: {msg}")
+
+    def _on_done(self, data):
+        self.run_btn.setEnabled(True)
+        self.progress.setVisible(False)
+        result = data["result"]
+
+        if result.success:
+            h_factor, f_factor = result.x
+            self.holdup_factor_lbl.setText(f"{h_factor:.4f}")
+            self.friction_factor_lbl.setText(f"{f_factor:.4f}")
+        else:
+            self.calib_error_lbl.setText(f"Calibration failed: {result.message}")
+
+        self._plot(data)
+
+    def _plot(self, data):
+        ax = self.chart.clear_axes()
+        
+        # Measured data
+        ax.plot(data["measured_pressures"], data["measured_depths"], 'ko', markersize=8, label="Measured Data")
+
+        # Original traverse
+        if data.get("original_traverse"):
+            orig_d, orig_p = data["original_traverse"]
+            ax.plot(orig_p, orig_d, color=WARNING, linestyle='--', linewidth=2, label="Original Model")
+
+        # Calibrated traverse
+        if data.get("calibrated_traverse"):
+            calib_d, calib_p = data["calibrated_traverse"]
+            ax.plot(calib_p, calib_d, color=SUCCESS, linewidth=2.5, label="Calibrated Model")
+
+        ax.invert_yaxis()
+        ax.set_xlabel("Pressure (psia)")
+        ax.set_ylabel("Depth (ft)")
+        ax.set_title("Pressure Traverse Calibration", fontsize=12, fontweight="bold", color=NAVY)
+        ax.legend()
+        self.chart.refresh()
 # ─────────────────────────────────────────────────────────────────────────────
 #  COMING SOON DIALOG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2394,9 +2607,9 @@ class HomeScreen(QWidget):
         self.nodal_card = HomeCard("▶", "Nodal Analysis",
             "IPR × VLP intersection — find the well operating point", is_primary=True)
         self.nodal_card.setFixedHeight(140)
-
+        
         self.calib_card = HomeCard("📌", "Calibration",
-            "Match VLP/IPR model to historical well-test data", is_disabled=True)
+            "Match VLP/IPR model to historical well-test data", is_disabled=False)
         self.gaslift_card = HomeCard("⛽", "Gas Lift Analysis",
             "Gas lift performance & injection optimization", is_disabled=True)
 
@@ -2602,13 +2815,12 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _open_calibration(self):
-        dlg = ComingSoonDialog(
-            "Calibration",
-            "The Calibration module will allow you to match IPR and VLP model parameters to historical "
-            "well-test data, providing history-matched predictions of well performance. "
-            "This feature is under active development and will be available in a future release.",
-            self
-        )
+        if not self.state.vlp_complete:
+            QMessageBox.information(
+                self, "Setup Required", "Please complete the VLP panel before running Calibration."
+            )
+            return
+        dlg = CalibrationPanel(self.state, self)
         dlg.exec()
 
     def _open_gaslift(self):
