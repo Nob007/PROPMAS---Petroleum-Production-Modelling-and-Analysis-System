@@ -1,22 +1,10 @@
-# IPR × VLP Nodal Analysis — Dependencies
-# ── Core scientific stack ────────────────────────────────────────────────────
+
 numpy>=1.24
 scipy>=1.10
-
-# ── Desktop GUI (PyQt6) ──────────────────────────────────────────────────────
 PyQt6>=6.5.0
 PyQt6-Qt6>=6.5.0
 PyQt6-sip>=13.5.0
-
-# ── Charting (embedded in Qt via QtAgg backend) ──────────────────────────────
 matplotlib>=3.7.0
-
-# ── Web Frontend Backend (Flask) ─────────────────────────────────────────────
 flask>=3.0.0
 flask-cors>=4.0.0
-
-# ── Deployment helpers ────────────────────────────────────────────────────────
-# For packaging the desktop app as a standalone executable:
-#   pip install pyinstaller
-#   pyinstaller IPM_Suite.spec
 pyinstaller>=6.0.0; extra == "build"

@@ -215,3 +215,172 @@ class vogel_ipr:
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.show()
+
+
+class fetkovich_ipr:
+    """
+    Calculates and plots the Inflow Performance Relationship (IPR) using 
+    Fetkovich for reservoirs for non-Darcy flow.
+    """
+    def __init__(self, Pr, Pb, q_test, Pwf_test, q_test2, Pwf_test2):
+        self.Pr = Pr
+        self.Pb = Pb  # Included for API compatibility with other models
+        self.q_test = q_test
+        self.Pwf_test = Pwf_test
+        self.q_test2 = q_test2
+        self.Pwf_test2 = Pwf_test2
+        
+        self.n = self._calculate_exponent()
+        self.C = self._calculate_constant()
+        self.q_max = self._calculate_aof()
+        self.J = (self.q_test * 2 * self.Pb) / ((self.Pr**2 - self.Pwf_test**2)**self.n)
+
+    def _calculate_exponent(self):
+        n = (np.log(self.q_test) - np.log(self.q_test2))/(np.log(self.Pr**2 - self.Pwf_test**2) - (np.log(self.Pr**2 - self.Pwf_test2**2) ))
+        if n < 0.5 or n > 1.0:
+            print(
+            f"Calculated Fetkovich exponent (n = {n:.2f}) falls outside the physical "
+            f"bounds of 0.5 to 1.0. This indicates un-stabilized well tests, changing skin, "
+            f"or bad gauge data. The value will be clipped to the nearest physical bound."
+            )
+        return np.clip(n, 0.5, 1.0)
+
+    def _calculate_constant(self):
+        return self.q_test/(self.Pr**2 - self.Pwf_test**2) **self.n
+
+    def _calculate_aof(self):
+        return self.C * self.Pr**(2*self.n)
+    
+    def calculate_q(self, Pwf):
+        return self.C * (self.Pr**2 - Pwf**2)**self.n
+
+    def calculate_Pwf(self, q):
+        if q >= self.q_max:
+            return 0.0
+        core = self.Pr**2 - (q/self.C)**(1/self.n)
+        return np.sqrt(max(0.0, core))
+
+    def plot_ipr(self, points=50):
+        Q = np.linspace(0, self.q_max, points)
+        Pwf_points = [self.calculate_Pwf(q) for q in Q]
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(Q, Pwf_points, label='Fetkovich IPR Curve', color='green', linewidth=2)
+        plt.scatter(self.q_test, self.Pwf_test, color='black', zorder=5, label='Well Test Data Point')
+        
+        plt.title('Fetkovic Inflow Performance Relationship (IPR)', fontweight='bold')
+        plt.xlabel('Liquid Flow Rate, q (STB/day)')
+        plt.ylabel('Bottom-Hole Flowing Pressure, Pwf (psia)')
+        plt.ylim(bottom=0)
+        plt.xlim(left=0)
+        
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.show()
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+class composite_fetkovich_ipr:
+    """
+    Calculates and plots the Composite Inflow Performance Relationship (IPR) 
+    for undersaturated and saturated oil wells using the Fetkovich method.
+    """
+    def __init__(self, Pr, Pb, q_test, Pwf_test, J = None, C=None, n=1.0):
+        """
+        Initialize the Composite Fetkovich IPR model.
+        
+        Parameters:
+        Pr (float): Reservoir pressure (psia)
+        Pb (float): Bubble point pressure (psia)
+        J  (float): Productivity Index above bubble point (STB/d/psi)
+        C  (float): Fetkovich performance coefficient. If None, it forces 
+                    smooth derivative continuity at Pb.
+        n  (float): Fetkovich exponent (typically 0.5 to 1.0)
+        """
+        self.Pr = Pr
+        # If reservoir pressure is below bubble point, it's a saturated reservoir.
+        # We cap Pb at Pr to safely handle saturated cases.
+        self.Pb = min(Pb, Pr) 
+        self.J = J if J is not None else (q_test * 2 * self.Pb) / ((self.Pr**2 - Pwf_test**2)**self.n)
+        self.n = n
+        
+        # 1. Calculate Flow Rate at the Bubble Point (Single-Phase Region)
+        self.qb = self.J * (self.Pr - self.Pb)
+        
+        # 2. Calculate Fetkovich Constant 'C' (if not explicitly provided)
+        # By default, we ensure the derivative of the Fetkovich curve matches 
+        # the linear PI (J) exactly at the bubble point for a smooth transition.
+        if C is None:
+            if self.Pb > 0:
+                # Derived from matching slopes: dq/dPwf(Fetkovich) = dq/dPwf(Linear) at Pb
+                self.C = self.J / (2 * self.n * self.Pb**(2 * self.n - 1))
+            else:
+                self.C = 0.0
+        else:
+            self.C = C
+            
+        # 3. Calculate Absolute Open Flow (AOF / q_max) at Pwf = 0
+        self.q_max = self.qb + self.C * (self.Pb**2)**self.n
+
+    def calculate_q(self, Pwf):
+        """Calculates flow rate (q) for a given bottom-hole pressure (Pwf)."""
+        Pwf = max(0.0, Pwf) # Pressure cannot be negative
+        
+        if Pwf >= self.Pb:
+            # Single-Phase Linear Flow
+            return max(0.0, self.J * (self.Pr - Pwf))
+        else:
+            # Two-Phase Fetkovich Flow
+            return self.qb + self.C * (self.Pb**2 - Pwf**2)**self.n
+
+    def calculate_Pwf(self, q):
+        """Calculates bottom-hole pressure (Pwf) for a given flow rate (q)."""
+        if q <= 0:
+            return self.Pr
+        if q >= self.q_max:
+            return 0.0 # Well is completely drawn down
+            
+        if q <= self.qb:
+            # We are in the Single-Phase Linear Flow regime
+            return self.Pr - (q / self.J)
+        else:
+            # We are in the Two-Phase Fetkovich Flow regime
+            # Rearranged: q = qb + C(Pb^2 - Pwf^2)^n
+            core = self.Pb**2 - ((q - self.qb) / self.C)**(1 / self.n)
+            # max(0, core) prevents math domain errors (taking sqrt of negatives)
+            return np.sqrt(max(0.0, core))
+
+    def plot_ipr(self, points=100):
+        """Generates the standard IPR curve plot."""
+        Q = np.linspace(0, self.q_max, points)
+        Pwf_points = [self.calculate_Pwf(q) for q in Q]
+        
+        plt.figure(figsize=(10, 6))
+        
+        # Plot the main curve
+        plt.plot(Q, Pwf_points, label='Composite Fetkovich IPR', color='#2ca02c', linewidth=2.5)
+        
+        # Highlight the Bubble Point transition
+        if self.Pb < self.Pr:
+            plt.scatter(self.qb, self.Pb, color='red', zorder=5, s=60, 
+                        label=f'Bubble Point ({self.qb:.1f} STB/d, {self.Pb} psia)')
+            
+            # Optional: Add dashed lines to show the regimes
+            plt.axhline(self.Pb, color='gray', linestyle='--', alpha=0.5)
+            plt.axvline(self.qb, color='gray', linestyle='--', alpha=0.5)
+            plt.text(self.qb * 0.5, self.Pr, 'Single-Phase\n(Linear)', 
+                     ha='center', va='top', alpha=0.7)
+            plt.text(self.qb + (self.q_max - self.qb)*0.5, self.Pb * 0.5, 'Two-Phase\n(Fetkovich)', 
+                     ha='center', alpha=0.7)
+
+        plt.title('Composite Fetkovich Inflow Performance Relationship', fontsize=14, fontweight='bold')
+        plt.xlabel('Liquid Flow Rate, q (STB/day)', fontsize=12)
+        plt.ylabel('Bottom-Hole Flowing Pressure, $P_{wf}$ (psia)', fontsize=12)
+        plt.ylim(bottom=0, top=self.Pr * 1.05)
+        plt.xlim(left=0, right=self.q_max * 1.05)
+        
+        plt.legend()
+        plt.grid(True, linestyle=':', alpha=0.7)
+        plt.show()

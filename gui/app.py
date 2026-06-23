@@ -47,7 +47,7 @@ _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-from core.ipr import composite_ipr, darcy_ipr, vogel_ipr
+from core.ipr import composite_ipr, darcy_ipr, vogel_ipr, fetkovich_ipr, composite_fetkovich_ipr
 from core.pvt import BlackOilPVT
 from core import vlp as vlp_module
 from core.vlp import HagedornBrown, Beggs_Brill
@@ -841,18 +841,18 @@ class IPRPanel(QDialog):
         model_lbl.setFixedWidth(190)
         model_lbl.setStyleSheet(f"color: {SLATE}; font-size: 12px; font-weight: 600;")
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["Composite", "Vogel", "Darcy"])
+        self.model_combo.addItems(["Composite", "Vogel", "Darcy", "Fetkovich", "Composite Fetkovich"])
         self.model_combo.currentTextChanged.connect(self._on_model_change)
         model_row.addWidget(model_lbl); model_row.addWidget(self.model_combo, 1)
         left_layout.addLayout(model_row)
 
         # Pr
-        self.pr_edit, pr_unit = make_input("e.g. 3500", unit="psia")
+        self.pr_edit, pr_unit = make_input("e.g. 2500", unit="psia")
         self.pr_edit.textChanged.connect(self._schedule_recompute)
         left_layout.addLayout(make_row("Reservoir Pressure (Pr)", self.pr_edit, pr_unit))
 
         # Pb
-        self.pb_edit, pb_unit = make_input("e.g. 2500", unit="psia")
+        self.pb_edit, pb_unit = make_input("e.g. 1800", unit="psia")
         self.pb_edit.textChanged.connect(self._schedule_recompute)
         self.pb_row_widget = QWidget()
         pb_row_l = make_row("Bubble Point Pressure (Pb)", self.pb_edit, pb_unit)
@@ -860,14 +860,32 @@ class IPRPanel(QDialog):
         left_layout.addWidget(self.pb_row_widget)
 
         # Qo_test
-        self.q_test_edit, qt_unit = make_input("e.g. 500", unit="STB/day")
+        self.q_test_edit, qt_unit = make_input("e.g. 800", unit="STB/day")
         self.q_test_edit.textChanged.connect(self._schedule_recompute)
         left_layout.addLayout(make_row("Test Rate (Qo_test)", self.q_test_edit, qt_unit))
 
         # Pwf_test
-        self.pwf_test_edit, pwft_unit = make_input("e.g. 1800", unit="psia")
+        self.pwf_test_edit, pwft_unit = make_input("e.g. 1200", unit="psia")
         self.pwf_test_edit.textChanged.connect(self._schedule_recompute)
         left_layout.addLayout(make_row("Test Pwf", self.pwf_test_edit, pwft_unit))
+
+        # Fetkovich-specific inputs
+        self.q_test2_edit, qt2_unit = make_input("e.g. 600", unit="STB/day")
+        self.q_test2_edit.textChanged.connect(self._schedule_recompute)
+        self.q_test2_row_widget = QWidget()
+        self.q_test2_row_widget.setLayout(make_row("Test Rate 2", self.q_test2_edit, qt2_unit))
+        left_layout.addWidget(self.q_test2_row_widget)
+
+        self.pwf_test2_edit, pwft2_unit = make_input("e.g. 1000", unit="psia")
+        self.pwf_test2_edit.textChanged.connect(self._schedule_recompute)
+        self.pwf_test2_row_widget = QWidget()
+        self.pwf_test2_row_widget.setLayout(make_row("Test Pwf 2", self.pwf_test2_edit, pwft2_unit))
+        left_layout.addWidget(self.pwf_test2_row_widget)
+
+        self.n_edit, n_unit = make_input("e.g. 0.8", unit="")
+        self.n_row_widget = QWidget()
+        self.n_row_widget.setLayout(make_row("Fetkovich Exponent (n)", self.n_edit, n_unit))
+        left_layout.addWidget(self.n_row_widget)
 
         # Separator
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -915,8 +933,13 @@ class IPRPanel(QDialog):
         main.addLayout(right_layout, 1)
 
     def _on_model_change(self, model):
-        # Hide Pb for Vogel (still kept in state for PVT reuse)
-        self.pb_row_widget.setVisible(model != "Vogel")
+        is_fetkovich = model == "Fetkovich"
+        is_comp_fetkovich = model == "Composite Fetkovich"
+
+        self.pb_row_widget.setVisible(model != "Darcy")
+        self.q_test2_row_widget.setVisible(is_fetkovich)
+        self.pwf_test2_row_widget.setVisible(is_fetkovich)
+        self.n_row_widget.setVisible(is_comp_fetkovich)
         self._schedule_recompute()
 
     def _schedule_recompute(self):
@@ -924,7 +947,8 @@ class IPRPanel(QDialog):
 
     def _load_from_state(self):
         s = self.state
-        idx = ["Composite", "Vogel", "Darcy"].index(s.ipr_model) if s.ipr_model in ["Composite", "Vogel", "Darcy"] else 0
+        models = ["Composite", "Vogel", "Darcy", "Fetkovich", "Composite Fetkovich"]
+        idx = models.index(s.ipr_model) if s.ipr_model in models else 0
         self.model_combo.setCurrentIndex(idx)
         for edit, val in [
             (self.pr_edit, s.Pr), (self.pb_edit, s.Pb),
@@ -937,14 +961,17 @@ class IPRPanel(QDialog):
         def safe(edit):
             try: return float(edit.text())
             except: return None
-        return (
-            self.model_combo.currentText(),
-            safe(self.pr_edit), safe(self.pb_edit),
-            safe(self.q_test_edit), safe(self.pwf_test_edit),
-        )
+        return {
+            "model": self.model_combo.currentText(),
+            "Pr": safe(self.pr_edit), "Pb": safe(self.pb_edit),
+            "q_test": safe(self.q_test_edit), "Pwf_test": safe(self.pwf_test_edit),
+            "q_test2": safe(self.q_test2_edit), "Pwf_test2": safe(self.pwf_test2_edit),
+            "n": safe(self.n_edit),
+        }
 
     def _recompute(self):
-        model, Pr, Pb, q_test, Pwf_test = self._get_inputs()
+        inputs = self._get_inputs()
+        model, Pr, Pb, q_test, Pwf_test = inputs["model"], inputs["Pr"], inputs["Pb"], inputs["q_test"], inputs["Pwf_test"]
         Pb = Pb or (Pr * 0.7 if Pr else None)
         if not all([Pr, q_test, Pwf_test]):
             self.validation_lbl.setText("Fill Pr, Test Rate, and Test Pwf to compute.")
@@ -959,12 +986,26 @@ class IPRPanel(QDialog):
                 ipr = composite_ipr(Pr, Pb, q_test, Pwf_test)
             elif model == "Darcy":
                 ipr = darcy_ipr(Pr, Pb, q_test, Pwf_test)
-            else:
+            elif model == "Vogel":
                 ipr = vogel_ipr(Pr, Pb, q_test, Pwf_test)
+            elif model == "Fetkovich":
+                q2, p2 = inputs["q_test2"], inputs["Pwf_test2"]
+                if not all([q2, p2]):
+                    self.validation_lbl.setText("Fetkovich requires a second test point.")
+                    return
+                ipr = fetkovich_ipr(Pr, Pb, q_test, Pwf_test, q2, p2)
+            elif model == "Composite Fetkovich":
+                # Calculate J from the linear part of a composite curve
+                temp_comp_ipr = composite_ipr(Pr, Pb, q_test, Pwf_test)
+                J = temp_comp_ipr.J
+                n = inputs.get("n") or 1.0
+                ipr = composite_fetkovich_ipr(Pr, Pb, q_test, Pwf_test, J, n=n)
+            else:
+                raise ValueError(f"Unknown IPR model: {model}")
 
             self.J_lbl.setText(f"{ipr.J:.4f}")
             self.qmax_lbl.setText(f"{ipr.q_max:.1f}")
-            if hasattr(ipr, "q_bp"):
+            if hasattr(ipr, "q_bp") and ipr.q_bp is not None:
                 self.qbp_lbl.setText(f"{ipr.q_bp:.1f}")
             else:
                 self.qbp_lbl.setText("N/A")
@@ -994,16 +1035,17 @@ class IPRPanel(QDialog):
         self.chart.refresh()
 
     def _apply(self):
-        model, Pr, Pb, q_test, Pwf_test = self._get_inputs()
+        inputs = self._get_inputs()
+        Pr, q_test, Pwf_test = inputs["Pr"], inputs["q_test"], inputs["Pwf_test"]
         if not all([Pr, q_test, Pwf_test]):
             QMessageBox.warning(self, "Incomplete", "Pr, Test Rate, and Test Pwf are required.")
             return
         if Pwf_test >= Pr:
             QMessageBox.warning(self, "Validation Error", "Pwf_test must be less than Pr.")
             return
-        self.state.ipr_model = model
+        self.state.ipr_model = inputs["model"]
         self.state.Pr = Pr
-        self.state.Pb = Pb
+        self.state.Pb = inputs["Pb"]
         self.state.Qo_test = q_test
         self.state.Pwf_test = Pwf_test
         self.state.ipr_saved = True
@@ -1049,7 +1091,7 @@ class PVTPanel(QDialog):
         oil_row = QHBoxLayout()
         self.oil_api_rb = QCheckBox("Use API gravity")
         self.oil_api_rb.toggled.connect(self._toggle_oil_input)
-        self.sg_oil_edit, u2 = make_input("0.84", unit="water=1")
+        self.sg_oil_edit, u2 = make_input("0.85", unit="water=1")
         self.sg_oil_edit.textChanged.connect(self._schedule)
         self.api_edit, u3 = make_input("°API", unit="°API")
         self.api_edit.textChanged.connect(self._schedule)
@@ -1063,11 +1105,11 @@ class PVTPanel(QDialog):
         api_row_w.setVisible(False); self.api_row_w = api_row_w
         left_l.addWidget(api_row_w)
 
-        self.sg_water_edit, u4 = make_input("1.03", unit="water=1")
+        self.sg_water_edit, u4 = make_input("1.07", unit="water=1")
         self.sg_water_edit.textChanged.connect(self._schedule)
         left_l.addLayout(make_row("Water Specific Gravity", self.sg_water_edit, u4))
 
-        self.wc_edit, u5 = make_input("0.0", unit="fraction 0–1")
+        self.wc_edit, u5 = make_input("0.33", unit="fraction 0–1")
         self.wc_edit.textChanged.connect(self._schedule)
         left_l.addLayout(make_row("Watercut", self.wc_edit, u5))
 
@@ -1284,10 +1326,10 @@ class VLPPanel(QDialog):
         left_l.addWidget(make_label("WELLBORE GEOMETRY"))
 
         fields = [
-            ("Tubing ID", "tubing_id_edit", "ft", "0.1623"),
-            ("Tubing OD", "tubing_od_edit", "ft", "0.1771"),
-            ("Casing ID", "casing_id_edit", "ft", "0.4167"),
-            ("Roughness", "roughness_edit", "ft", "0.00015"),
+            ("Tubing ID", "tubing_id_edit", "in", "2.441"),
+            ("Tubing OD", "tubing_od_edit", "in", "2.875"),
+            ("Casing ID", "casing_id_edit", "in", "5.500"),
+            ("Roughness", "roughness_edit", "in", "0.0006"),
             ("Deviation Angle", "theta_edit", "°", "0"),
             ("Total Depth", "depth_edit", "ft", ""),
             ("Depth Step", "dz_step_edit", "ft", "50"),
@@ -1360,8 +1402,8 @@ class VLPPanel(QDialog):
         idx = 0 if s.vlp_model == "Hagedorn-Brown" else 1
         self.corr_combo.setCurrentIndex(idx)
         map_fields = [
-            (self.tubing_id_edit, s.tubing_id), (self.tubing_od_edit, s.tubing_od),
-            (self.casing_id_edit, s.casing_id), (self.roughness_edit, s.roughness),
+            (self.tubing_id_edit, (s.tubing_id * 12) if s.tubing_id else None), (self.tubing_od_edit, (s.tubing_od * 12) if s.tubing_od else None),
+            (self.casing_id_edit, (s.casing_id * 12) if s.casing_id else None), (self.roughness_edit, (s.roughness * 12) if s.roughness else None),
             (self.theta_edit, s.theta), (self.depth_edit, s.depth),
             (self.dz_step_edit, s.dz_step), (self.thp_edit, s.thp),
             (self.T_surf_edit, s.T_surface), (self.T_bh_edit, s.T_bh),
@@ -1378,10 +1420,10 @@ class VLPPanel(QDialog):
             except: return default
         return {
             "vlp_model": self.corr_combo.currentText(),
-            "tubing_id": safe(self.tubing_id_edit),
-            "tubing_od": safe(self.tubing_od_edit),
-            "casing_id": safe(self.casing_id_edit),
-            "roughness": safe(self.roughness_edit, 0.00015),
+            "tubing_id": safe(self.tubing_id_edit) / 12.0 if safe(self.tubing_id_edit) is not None else None,
+            "tubing_od": safe(self.tubing_od_edit) / 12.0 if safe(self.tubing_od_edit) is not None else None,
+            "casing_id": safe(self.casing_id_edit) / 12.0 if safe(self.casing_id_edit) is not None else None,
+            "roughness": safe(self.roughness_edit, 0.0006) / 12.0,
             "theta": safe(self.theta_edit, 0.0),
             "depth": safe(self.depth_edit),
             "dz_step": safe(self.dz_step_edit, 50.0),
