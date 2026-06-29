@@ -124,13 +124,14 @@ def apply_gas_lift_design(
             elif hasattr(gl_obj, "update_fluid_properties"):
                 gl_obj.update_fluid_properties(current_P, current_temp, Ql)
 
-            # The calculate_gradient method in HagedornBrown requires Ql, but Beggs_Brill does not.
+            # The calculate_gradient method in HagedornBrown requires Ql, but Beggs_Brill and DunsRos do not.
             # We check the method signature to pass it only when needed.
             import inspect
             sig = inspect.signature(gl_obj.calculate_gradient)
-            if 'Ql' in sig.parameters:
+            if 'Ql' in sig.parameters:  # HagedornBrown
+                # HagedornBrown returns more values, which we unpack safely
                 dp_dz, Hl, f, dp_h, dp_f, *_ = gl_obj.calculate_gradient(current_P, Ql, return_components=True)
-            else:
+            else:  # Beggs_Brill and DunsRos
                 dp_dz, Hl, f, dp_h, dp_f = gl_obj.calculate_gradient(current_P, return_components=True)
 
             current_P += dp_dz * actual_step

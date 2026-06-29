@@ -510,8 +510,19 @@ def build_vlp(state: AppState, pvt_model: BlackOilPVT, fp_dict: dict):
                 watercut=state.wc,
                 theta=state.theta,
             )
-        else:
+        elif state.vlp_model == "Beggs-Brill":
             obj = Beggs_Brill(
+                tubing_id=state.tubing_id,
+                tubing_od=state.tubing_od or state.tubing_id * 1.2,
+                casing_id=state.casing_id or state.tubing_id * 2.5,
+                roughness=state.roughness,
+                pvt_model=pvt_model,
+                fluid_properties=fp_dict,
+                watercut=state.wc,
+                theta=state.theta,
+            ) # This was the missing parenthesis
+        elif state.vlp_model == "Duns and Ros":
+            obj = vlp_module.DunsRos(
                 tubing_id=state.tubing_id,
                 tubing_od=state.tubing_od or state.tubing_id * 1.2,
                 casing_id=state.casing_id or state.tubing_id * 2.5,
@@ -1454,7 +1465,7 @@ class VLPPanel(QDialog):
         corr_lbl = QLabel("VLP Correlation"); corr_lbl.setFixedWidth(190)
         corr_lbl.setStyleSheet(f"color:{SLATE}; font-size:12px; font-weight:600;")
         self.corr_combo = QComboBox()
-        self.corr_combo.addItems(["Hagedorn-Brown", "Beggs-Brill"])
+        self.corr_combo.addItems(["Hagedorn-Brown", "Beggs-Brill", "Duns and Ros"])
         corr_row.addWidget(corr_lbl); corr_row.addWidget(self.corr_combo, 1)
         left_l.addLayout(corr_row)
 
@@ -1544,8 +1555,10 @@ class VLPPanel(QDialog):
 
     def _load_from_state(self):
         s = self.state
-        idx = 0 if s.vlp_model == "Hagedorn-Brown" else 1
-        self.corr_combo.setCurrentIndex(idx)
+        models = ["Hagedorn-Brown", "Beggs-Brill", "Duns and Ros"]
+        if s.vlp_model in models:
+            self.corr_combo.setCurrentText(s.vlp_model)
+
         map_fields = [
             (self.tubing_id_edit, (s.tubing_id * 12) if s.tubing_id else None), (self.tubing_od_edit, (s.tubing_od * 12) if s.tubing_od else None),
             (self.casing_id_edit, (s.casing_id * 12) if s.casing_id else None), (self.roughness_edit, (s.roughness * 12) if s.roughness else None),
